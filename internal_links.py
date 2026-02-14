@@ -2,156 +2,108 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import time
 import re
 
-# --- 1. UI CONFIGURATION ---
-st.set_page_config(page_title="SEO Internal Link Pro", page_icon="🔗", layout="wide")
+# --- UI CONFIG ---
+st.set_page_config(page_title="SEO Link Pro: Enterprise", page_icon="🏢", layout="wide")
 
-# Custom CSS for a Premium Branding
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; border: 1px solid #31333f; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #FF4B4B; color: white; font-weight: bold; }
-    .reportview-container .main .block-container { padding-top: 2rem; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. HELPER FUNCTIONS ---
-
+# --- HELPER FUNCTIONS ---
 def normalize_url(url):
-    """Removes protocol and trailing slashes for accurate comparison."""
     if not url: return ""
-    url = url.lower().strip().replace("https://", "").replace("http://", "")
+    url = str(url).lower().strip().replace("https://", "").replace("http://", "")
     if url.endswith("/"): url = url[:-1]
     return url
 
-def fetch_content(url):
-    """Fetches page content using a Googlebot User-Agent."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-    }
+def get_urls_from_sitemap(sitemap_url, filter_path=""):
+    """Fetch URLs, handling Sitemap Indexes and filtering by path."""
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return response.text
-    except Exception as e:
-        return None
-    return None
+        res = requests.get(sitemap_url, timeout=10)
+        soup = BeautifulSoup(res.content, 'xml')
+        
+        # Check if it's a Sitemap Index or a standard Sitemap
+        tags = soup.find_all('loc')
+        urls = [t.text for t in tags]
+        
+        # If it's a sitemap index, we might need to go one level deeper 
+        # But for speed, we will filter the current list first
+        if filter_path:
+            urls = [u for u in urls if filter_path in u]
+            
+        return list(set(urls))
+    except:
+        return []
 
-# --- 3. SIDEBAR SETTINGS ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Configuration")
-    max_pages = st.slider("Sitemap Scan Limit", 10, 1000, 100, help="How many pages from the sitemap should we check?")
-    debug_mode = st.checkbox("Enable Debug Mode", help="Shows what the script 'sees' on each page.")
-    st.markdown("---")
-    st.markdown("### How to use:")
-    st.write("1. Upload CSV (Col A: Target URL, Col B: Keyword)")
-    st.write("2. Enter Sitemap URL")
-    st.write("3. Run Analysis")
+    st.header("⚡ Enterprise Settings")
+    url_filter = st.text_input("URL Path Filter (Recommended)", placeholder="e.g. /blog/", help="Only scan URLs containing this string. Essential for sites with 100k+ pages.")
+    max_pages = st.number_input("Scan Limit", min_value=10, max_value=5000, value=200, help="How many pages to check in this session.")
+    st.warning("⚠️ Large sites take time. Scanning 200 pages takes ~3-5 minutes.")
 
-# --- 4. MAIN INTERFACE ---
-st.title("🔗 Internal Link Opportunity Finder")
-st.write("Find 'unlinked mentions' of your target keywords across your website.")
+# --- MAIN UI ---
+st.title("🔗 Internal Link Opportunity Finder (Large Site Mode)")
+st.info(f"Targeting a site with 100k+ pages? Use the **URL Path Filter** in the sidebar to focus on your blog or resource section.")
 
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Step 1: Upload Targets")
-    uploaded_file = st.file_uploader("Upload CSV File", type="csv")
-    if uploaded_file:
-        df_targets = pd.read_csv(uploaded_file)
-        st.success(f"✅ {len(df_targets)} targets loaded.")
-
+    uploaded_file = st.file_uploader("Upload CSV (Col A: Target URL, Col B: Keyword)", type="csv")
 with col2:
-    st.subheader("Step 2: Site Source")
-    sitemap_url = st.text_input("Enter Sitemap XML URL", placeholder="https://example.com/sitemap.xml")
-    run_analysis = st.button("🚀 Run Bulk Analysis")
+    sitemap_input = st.text_input("Sitemap URL", placeholder="https://example.com/post-sitemap.xml")
+    run_btn = st.button("🚀 Start Focused Analysis")
 
-# --- 5. EXECUTION LOGIC ---
-if run_analysis and uploaded_file and sitemap_url:
-    try:
-        # Fetch and Parse Sitemap
-        with st.status("Gathering URLs from Sitemap...", expanded=True) as status:
-            sitemap_res = requests.get(sitemap_url)
-            sitemap_soup = BeautifulSoup(sitemap_res.content, 'xml')
-            # Extract all <loc> tags
-            all_urls = [loc.text for loc in sitemap_soup.find_all('loc')]
-            all_urls = list(set(all_urls))[:max_pages] # Remove duplicates and limit
+if run_btn and uploaded_file and sitemap_input:
+    df_targets = pd.read_csv(uploaded_file)
+    
+    with st.status("Gathering and Filtering URLs...", expanded=True) as status:
+        # Step 1: Get filtered URLs
+        all_urls = get_urls_from_sitemap(sitemap_input, url_filter)
+        all_urls = all_urls[:int(max_pages)] # Apply the cap
+        
+        if not all_urls:
+            st.error("No URLs found. If this is a Sitemap Index, try pasting the specific sub-sitemap URL (e.g., sitemap-posts.xml) instead.")
+            st.stop()
             
-            st.write(f"Found {len(all_urls)} pages to scan.")
+        st.write(f"✅ Found {len(all_urls)} URLs matching your filter.")
+        
+        results = []
+        progress_bar = st.progress(0)
+        
+        # Step 2: Analysis Loop
+        for idx, row in df_targets.iterrows():
+            target_url = str(row.iloc[0]).strip()
+            keyword = str(row.iloc[1]).strip().lower()
+            norm_target = normalize_url(target_url)
             
-            results = []
-            progress_bar = st.progress(0)
+            status.write(f"Searching for **'{keyword}'**...")
             
-            # Start Loop
-            for idx, row in df_targets.iterrows():
-                target_url = str(row.iloc[0]).strip()
-                keyword = str(row.iloc[1]).strip().lower()
-                norm_target = normalize_url(target_url)
+            for i, site_url in enumerate(all_urls):
+                if normalize_url(site_url) == norm_target:
+                    continue
                 
-                status.write(f"Searching for: **{keyword}** (Targeting {target_url})")
-                
-                for site_url in all_urls:
-                    # Skip if the site_url is the target itself
-                    if normalize_url(site_url) == norm_target:
-                        continue
+                try:
+                    # Update internal progress
+                    h = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)'}
+                    r = requests.get(site_url, headers=h, timeout=5)
+                    s = BeautifulSoup(r.text, 'html.parser')
+                    text = s.get_text().lower()
                     
-                    html = fetch_content(site_url)
-                    if not html:
-                        continue
-                        
-                    soup = BeautifulSoup(html, 'html.parser')
-                    text = soup.get_text().lower()
-                    
-                    if debug_mode:
-                        st.write(f"Checking {site_url}... (Text length: {len(text)})")
-
-                    # Logic: Is keyword present?
                     if keyword in text:
-                        # Logic: Is target URL already linked?
-                        links = [normalize_url(a.get('href')) for a in soup.find_all('a', href=True)]
-                        
+                        links = [normalize_url(a.get('href')) for a in s.find_all('a', href=True)]
                         if norm_target not in links:
-                            results.append({
-                                "Target Keyword": keyword,
-                                "Found on Page": site_url,
-                                "Missing Link To": target_url
-                            })
-                
-                # Update UI Progress
-                progress_bar.progress((idx + 1) / len(df_targets))
+                            results.append({"Keyword": keyword, "Found on": site_url, "Missing Link To": target_url})
+                except:
+                    continue
             
-            status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
+            progress_bar.progress((idx + 1) / len(df_targets))
 
-        # --- 6. DISPLAY RESULTS ---
-        if results:
-            df_results = pd.DataFrame(results)
-            st.subheader("🎯 Link Opportunities Found")
-            
-            # Metrics
-            m1, m2 = st.columns(2)
-            m1.metric("Total Gaps", len(df_results))
-            m2.metric("Unique Pages", df_results['Found on Page'].nunique())
-            
-            st.dataframe(df_results, use_container_width=True)
-            
-            # Download Button
-            csv_data = df_results.to_csv(index=False).encode('utf-8')
-            st.download_button("📩 Download CSV Report", csv_data, "link_opportunities.csv", "text/csv")
-        else:
-            st.warning("No unlinked mentions found. Double-check your Sitemap URL or increase the Scan Limit.")
-            if debug_mode:
-                st.info("DEBUG: Try checking a URL manually that you KNOW has the keyword to see if the script can read the text.")
+        status.update(label="Analysis Complete!", state="complete")
 
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-else:
-    if run_analysis:
-        st.error("Please provide both a CSV and a Sitemap URL.")
-
-# Footer
-st.markdown("---")
-st.caption("SEO Link Pro | Built with Streamlit & Python")
+    # Display Results
+    if results:
+        res_df = pd.DataFrame(results)
+        st.subheader("🎯 Opportunities Found")
+        st.dataframe(res_df, use_container_width=True)
+        st.download_button("Download Report", res_df.to_csv(index=False), "links.csv")
+    else:
+        st.warning("No unlinked mentions found in the sampled pages.")
